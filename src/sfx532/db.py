@@ -1,7 +1,7 @@
 import sqlite3
 from .paths import DB
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = r'''
 PRAGMA foreign_keys = ON;
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS videos (
     relpath TEXT NOT NULL UNIQUE,
     sha256 TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
-    mtime_ns INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL DEFAULT 0,
     duration_sec REAL,
     width INTEGER,
     height INTEGER,
@@ -120,6 +120,26 @@ def connect():
     return con
 
 
+def _columns(con, table):
+    return {row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_column(con, table, column_name, declaration):
+    if column_name not in _columns(con, table):
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {declaration}")
+
+
+def _migrate_legacy_bootstrap(con):
+    # Handles databases created by the earliest project bootstrap before
+    # schema versioning was introduced. ALTER TABLE is intentionally additive
+    # so existing research is never deleted just because the tool was updated.
+    _ensure_column(con, "videos", "mtime_ns", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(con, "event_candidates", "video_clip_relpath", "TEXT")
+    _ensure_column(con, "event_candidates", "frame_before_relpath", "TEXT")
+    _ensure_column(con, "event_candidates", "frame_peak_relpath", "TEXT")
+    _ensure_column(con, "event_candidates", "frame_after_relpath", "TEXT")
+
+
 def init_db():
     DB.parent.mkdir(parents=True, exist_ok=True)
     with connect() as con:
@@ -128,12 +148,12 @@ def init_db():
             raise RuntimeError(
                 f"Database schema {current} is newer than this tool supports ({SCHEMA_VERSION})."
             )
-        if current == 0:
-            con.executescript(SCHEMA)
-            con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif current == SCHEMA_VERSION:
-            con.executescript(SCHEMA)
-        else:
-            raise RuntimeError(
-                f"Missing migration path from schema {current} to {SCHEMA_VERSION}."
-            )
+
+        # Always create missing tables/indexes first. CREATE IF NOT EXISTS does
+        # not modify existing tables, so column migrations are handled below.
+        con.executescript(SCHEMA)
+        _migrate_legacy_bootstrap(con)
+
+        # Version 1 -> 2 introduced incremental file scan metadata and complete
+        # visual evidence paths. The additive checks above perform the migration.
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
