@@ -64,11 +64,25 @@ def extract_audio_clip(video: Path, start: float, end: float, out_wav: Path, sam
     subprocess.run(cmd, check=True)
 
 
+def extract_video_clip(video: Path, start: float, end: float, out_mp4: Path) -> None:
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.05, end - start)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{start:.3f}", "-i", str(video), "-t", f"{duration:.3f}",
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", str(out_mp4),
+    ]
+    subprocess.run(cmd, check=True)
+
+
 def extract_frame(video: Path, sec: float, out_jpg: Path) -> None:
     out_jpg.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", f"{sec:.3f}", "-i", str(video),
+        "-ss", f"{max(0.0, sec):.3f}", "-i", str(video),
         "-frames:v", "1", "-q:v", "2", str(out_jpg),
     ]
     subprocess.run(cmd, check=True)
