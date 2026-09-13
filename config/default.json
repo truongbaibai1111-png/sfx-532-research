@@ -3,7 +3,7 @@
   "audio_channels": 1,
   "frame_interval_sec": 1.0,
   "pipeline_version": "0.1.0",
-  "schema_version": "1",
+  "schema_version": "2",
   "event": {
     "window_ms": 25,
     "hop_ms": 10,
