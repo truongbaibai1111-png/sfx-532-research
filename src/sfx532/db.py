@@ -1,6 +1,8 @@
 import sqlite3
 from .paths import DB
 
+SCHEMA_VERSION = 1
+
 SCHEMA = r'''
 PRAGMA foreign_keys = ON;
 
@@ -10,6 +12,7 @@ CREATE TABLE IF NOT EXISTS videos (
     relpath TEXT NOT NULL UNIQUE,
     sha256 TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
     duration_sec REAL,
     width INTEGER,
     height INTEGER,
@@ -100,7 +103,7 @@ CREATE TABLE IF NOT EXISTS assets (
     credit_text TEXT,
     checked_date TEXT,
     availability_status TEXT,
-    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE SET NULL
+    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_video ON event_candidates(video_id);
@@ -118,5 +121,19 @@ def connect():
 
 
 def init_db():
+    DB.parent.mkdir(parents=True, exist_ok=True)
     with connect() as con:
-        con.executescript(SCHEMA)
+        current = con.execute("PRAGMA user_version").fetchone()[0]
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database schema {current} is newer than this tool supports ({SCHEMA_VERSION})."
+            )
+        if current == 0:
+            con.executescript(SCHEMA)
+            con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        elif current == SCHEMA_VERSION:
+            con.executescript(SCHEMA)
+        else:
+            raise RuntimeError(
+                f"Missing migration path from schema {current} to {SCHEMA_VERSION}."
+            )
