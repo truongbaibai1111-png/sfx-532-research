@@ -1,7 +1,14 @@
 import json
+import shutil
+
 from .paths import RAW, AUDIO, EVENTS, CONFIG
 from .db import connect
-from .media import extract_audio, extract_audio_clip
+from .media import (
+    extract_audio,
+    extract_audio_clip,
+    extract_video_clip,
+    extract_frame,
+)
 from .detect import detect_candidates
 
 
@@ -15,6 +22,10 @@ def get_video(video_id: int) -> dict:
         if row is None:
             raise KeyError(f"Unknown video_id={video_id}")
         return dict(row)
+
+
+def _data_relpath(path):
+    return path.relative_to(RAW.parent).as_posix()
 
 
 def process_video(video_id: int) -> dict:
@@ -52,26 +63,49 @@ def process_video(video_id: int) -> dict:
         candidates = detect_candidates(wav_path, **cfg["event"])
 
         event_dir = EVENTS / f"video_{video_id:04d}"
+        if event_dir.exists():
+            shutil.rmtree(event_dir)
         event_dir.mkdir(parents=True, exist_ok=True)
 
         with connect() as con:
             con.execute("DELETE FROM event_candidates WHERE video_id=?", (video_id,))
 
             for index, event in enumerate(candidates, start=1):
-                clip_path = event_dir / f"event_{index:04d}.wav"
+                base = f"event_{index:04d}"
+                audio_clip = event_dir / f"{base}.wav"
+                video_clip = event_dir / f"{base}.mp4"
+                frame_before = event_dir / f"{base}_before.jpg"
+                frame_peak = event_dir / f"{base}_peak.jpg"
+                frame_after = event_dir / f"{base}_after.jpg"
+
                 extract_audio_clip(
                     video_path,
                     event["start_sec"],
                     event["end_sec"],
-                    clip_path,
+                    audio_clip,
                     cfg["sample_rate"],
                 )
-                relpath = clip_path.relative_to(RAW.parent).as_posix()
+                extract_video_clip(
+                    video_path,
+                    event["start_sec"],
+                    event["end_sec"],
+                    video_clip,
+                )
+
+                # Visual context: one frame before onset, one at the energy peak,
+                # and one immediately after the candidate. These are evidence only;
+                # they do not classify the action by themselves.
+                extract_frame(video_path, max(0.0, event["start_sec"] - 0.15), frame_before)
+                extract_frame(video_path, event["peak_sec"], frame_peak)
+                extract_frame(video_path, event["end_sec"] + 0.10, frame_after)
+
                 con.execute(
                     """
                     INSERT INTO event_candidates
-                    (video_id,start_sec,end_sec,peak_sec,score,detector,audio_clip_relpath)
-                    VALUES (?,?,?,?,?,?,?)
+                    (video_id,start_sec,end_sec,peak_sec,score,detector,
+                     audio_clip_relpath,video_clip_relpath,
+                     frame_before_relpath,frame_peak_relpath,frame_after_relpath)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         video_id,
@@ -80,7 +114,11 @@ def process_video(video_id: int) -> dict:
                         event["peak_sec"],
                         event["score"],
                         event["detector"],
-                        relpath,
+                        _data_relpath(audio_clip),
+                        _data_relpath(video_clip),
+                        _data_relpath(frame_before),
+                        _data_relpath(frame_peak),
+                        _data_relpath(frame_after),
                     ),
                 )
 
