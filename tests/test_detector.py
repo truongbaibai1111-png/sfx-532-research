@@ -31,3 +31,29 @@ def test_detects_short_transient():
 
         assert events
         assert any(event["start_sec"] <= 0.9 <= event["end_sec"] for event in events)
+
+
+def test_silence_does_not_become_one_large_event():
+    sr = 16000
+    x = np.zeros(sr * 3, dtype=np.float32)
+
+    with tempfile.TemporaryDirectory() as td:
+        wav_path = Path(td) / "silence.wav"
+        _write_wav(wav_path, x, sr)
+        events = detect_candidates(wav_path)
+
+        assert events == []
+
+
+def test_steady_quiet_tone_is_not_selected_only_by_percentile():
+    sr = 16000
+    t = np.arange(sr * 2) / sr
+    x = (0.001 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+    with tempfile.TemporaryDirectory() as td:
+        wav_path = Path(td) / "tone.wav"
+        _write_wav(wav_path, x, sr)
+        events = detect_candidates(wav_path)
+
+        # The detector is intended to find change/cues, not mark a constant quiet bed.
+        assert len(events) <= 1
