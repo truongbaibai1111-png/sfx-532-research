@@ -12,6 +12,9 @@ from .media import (
 from .detect import detect_candidates
 
 
+PROTECTED_STATES = {"RESEARCHED", "INDEXED", "COMPLETE"}
+
+
 def load_config():
     return json.loads(CONFIG.read_text(encoding="utf-8"))
 
@@ -28,10 +31,26 @@ def _data_relpath(path):
     return path.relative_to(RAW.parent).as_posix()
 
 
+def _clamp_frame_time(sec: float, duration_sec):
+    sec = max(0.0, float(sec))
+    if duration_sec is None:
+        return sec
+    return min(sec, max(0.0, float(duration_sec) - 0.01))
+
+
 def process_video(video_id: int) -> dict:
     cfg = load_config()
     video_row = get_video(video_id)
     video_path = RAW / video_row["relpath"]
+
+    if video_row["ingest_status"] == "INVALID" or video_row["process_status"] == "INVALID":
+        raise RuntimeError(f"video_id={video_id} is marked INVALID; fix/replace the source file first")
+
+    if video_row["process_status"] in PROTECTED_STATES:
+        raise RuntimeError(
+            f"video_id={video_id} is already {video_row['process_status']}; "
+            "candidate regeneration is blocked to protect reviewed research"
+        )
 
     if not video_path.exists():
         raise FileNotFoundError(video_path)
@@ -92,12 +111,15 @@ def process_video(video_id: int) -> dict:
                     video_clip,
                 )
 
-                # Visual context: one frame before onset, one at the energy peak,
-                # and one immediately after the candidate. These are evidence only;
-                # they do not classify the action by themselves.
-                extract_frame(video_path, max(0.0, event["start_sec"] - 0.15), frame_before)
-                extract_frame(video_path, event["peak_sec"], frame_peak)
-                extract_frame(video_path, event["end_sec"] + 0.10, frame_after)
+                duration = video_row["duration_sec"]
+                before_sec = _clamp_frame_time(event["start_sec"] - 0.15, duration)
+                peak_sec = _clamp_frame_time(event["peak_sec"], duration)
+                after_sec = _clamp_frame_time(event["end_sec"] + 0.10, duration)
+
+                # These frames are evidence/context only. They do not classify the action.
+                extract_frame(video_path, before_sec, frame_before)
+                extract_frame(video_path, peak_sec, frame_peak)
+                extract_frame(video_path, after_sec, frame_after)
 
                 con.execute(
                     """
