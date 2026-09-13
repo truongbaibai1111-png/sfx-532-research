@@ -1,0 +1,18 @@
+{
+  "sample_rate": 16000,
+  "audio_channels": 1,
+  "frame_interval_sec": 1.0,
+  "pipeline_version": "0.1.0",
+  "schema_version": "1",
+  "event": {
+    "window_ms": 25,
+    "hop_ms": 10,
+    "min_event_ms": 80,
+    "max_event_ms": 6000,
+    "merge_gap_ms": 120,
+    "energy_percentile": 82,
+    "onset_z": 2.8,
+    "pre_roll_ms": 120,
+    "post_roll_ms": 220
+  }
+}
