@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+
+# Raw/derived media must stay local
+data/raw_videos/*
+!data/raw_videos/.gitkeep
+data/derived/*
+!data/derived/.gitkeep
+
+# Local database / exports / logs
+data/db/*.sqlite
+data/db/*.sqlite-*
+data/exports/*
+!data/exports/.gitkeep
+logs/*
+!logs/.gitkeep
