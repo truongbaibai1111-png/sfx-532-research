@@ -1,0 +1,51 @@
+{
+  "motion_phase": [
+    "anticipation",
+    "startup",
+    "continuous_motion",
+    "acceleration",
+    "contact",
+    "impact",
+    "recoil",
+    "reaction",
+    "settle",
+    "offscreen"
+  ],
+  "sound_role": [
+    "foley",
+    "movement",
+    "whoosh",
+    "impact",
+    "texture",
+    "mechanical",
+    "body",
+    "vocal_nonverbal",
+    "comedic_accent",
+    "magic",
+    "environment"
+  ],
+  "material": [
+    "skin",
+    "cloth",
+    "rubber",
+    "metal",
+    "wood",
+    "glass",
+    "plastic",
+    "paper",
+    "water",
+    "dirt",
+    "sand",
+    "stone",
+    "concrete",
+    "unknown"
+  ],
+  "evidence_status": [
+    "UNVERIFIED",
+    "HEARD_CONFIRMED",
+    "VISUAL_CONFIRMED",
+    "AUDIO_VISUAL_CONFIRMED",
+    "CREATIVE_ONLY",
+    "REJECTED"
+  ]
+}
