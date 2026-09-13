@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS event_candidates (
     score REAL,
     detector TEXT NOT NULL,
     audio_clip_relpath TEXT,
+    video_clip_relpath TEXT,
+    frame_before_relpath TEXT,
+    frame_peak_relpath TEXT,
+    frame_after_relpath TEXT,
     review_status TEXT NOT NULL DEFAULT 'UNREVIEWED',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
@@ -105,11 +109,13 @@ CREATE INDEX IF NOT EXISTS idx_events_action_vi ON events(action_vi);
 CREATE INDEX IF NOT EXISTS idx_events_action_en ON events(action_en);
 '''
 
+
 def connect():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con
+
 
 def init_db():
     with connect() as con:
