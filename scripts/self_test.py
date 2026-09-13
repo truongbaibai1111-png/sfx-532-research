@@ -22,23 +22,34 @@ def check_command(name):
     print(f"PASS: {name} -> {path}")
 
 
+def _write_wav(path, x, sr=16000):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
 def synthetic_detector_test():
     sr = 16000
-    x = np.zeros(sr * 2, dtype=np.float32)
-    x[int(0.9 * sr):int(0.95 * sr)] = 0.8
-
     with tempfile.TemporaryDirectory() as td:
-        wav_path = Path(td) / "synthetic.wav"
-        with wave.open(str(wav_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(sr)
-            w.writeframes((x * 32767).astype(np.int16).tobytes())
+        td = Path(td)
 
-        events = detect_candidates(wav_path)
+        transient = np.zeros(sr * 2, dtype=np.float32)
+        transient[int(0.9 * sr):int(0.95 * sr)] = 0.8
+        transient_path = td / "transient.wav"
+        _write_wav(transient_path, transient, sr)
+        events = detect_candidates(transient_path)
         if not events or not any(e["start_sec"] <= 0.9 <= e["end_sec"] for e in events):
             raise RuntimeError("candidate detector failed synthetic transient test")
-        print(f"PASS: detector found {len(events)} candidate(s) in synthetic test")
+        print(f"PASS: detector found {len(events)} candidate(s) around synthetic transient")
+
+        silence_path = td / "silence.wav"
+        _write_wav(silence_path, np.zeros(sr * 3, dtype=np.float32), sr)
+        silence_events = detect_candidates(silence_path)
+        if silence_events:
+            raise RuntimeError("silence must not become an event candidate")
+        print("PASS: silence produces no candidate")
 
 
 def main():
