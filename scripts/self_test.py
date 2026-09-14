@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sfx532.db import init_db
 from sfx532.detect import detect_candidates
+from sfx532.media import ffprobe
 from sfx532.paths import DB
 
 
@@ -28,6 +29,25 @@ def _write_wav(path, x, sr=16000):
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+def unicode_ffprobe_test():
+    """Regression test for Windows Unicode media paths.
+
+    This specifically protects against subprocess trying to decode ffprobe
+    output with the active ANSI code page (cp1252/cp1258) when filenames
+    contain Korean/Vietnamese/etc characters.
+    """
+    sr = 16000
+    with tempfile.TemporaryDirectory() as td:
+        media_path = Path(td) / "001_뒤통수_âm-thanh.wav"
+        _write_wav(media_path, np.zeros(sr, dtype=np.float32), sr)
+        meta = ffprobe(media_path)
+        if meta["has_audio"] != 1:
+            raise RuntimeError("ffprobe Unicode-path test did not detect audio")
+        if meta["duration_sec"] is None:
+            raise RuntimeError("ffprobe Unicode-path test did not return duration")
+        print("PASS: ffprobe handles Unicode media filename")
 
 
 def synthetic_detector_test():
@@ -66,6 +86,7 @@ def main():
         raise RuntimeError("SQLite database was not created")
     print(f"PASS: SQLite -> {DB}")
 
+    unicode_ffprobe_test()
     synthetic_detector_test()
     print("\nALL CORE CHECKS PASSED")
 
