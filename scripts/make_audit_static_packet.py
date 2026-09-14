@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sfx532.db import connect
+from sfx532.db import connect, init_db
 from sfx532.paths import EXPORTS, RAW, AUDIO
 
 
@@ -172,19 +172,33 @@ def main():
     ap.add_argument("--count", type=int, default=24)
     ap.add_argument("--context", type=float, default=3.0)
     ap.add_argument("--frame-offset", type=float, default=0.75)
+    ap.add_argument(
+        "--include-secondary",
+        action="store_true",
+        help="Sample all retained candidates. Default V0.2 behavior audits PRIMARY only.",
+    )
     args = ap.parse_args()
 
+    init_db()
     with connect() as con:
         video = con.execute("SELECT * FROM videos WHERE id=?", (args.video_id,)).fetchone()
         if not video:
             raise SystemExit(f"Unknown video_id={args.video_id}")
-        rows = con.execute(
-            "SELECT * FROM event_candidates WHERE video_id=? ORDER BY start_sec",
-            (args.video_id,),
-        ).fetchall()
+        if args.include_secondary:
+            rows = con.execute(
+                "SELECT * FROM event_candidates WHERE video_id=? ORDER BY start_sec",
+                (args.video_id,),
+            ).fetchall()
+            audit_scope = "ALL"
+        else:
+            rows = con.execute(
+                "SELECT * FROM event_candidates WHERE video_id=? AND review_tier='PRIMARY' ORDER BY start_sec",
+                (args.video_id,),
+            ).fetchall()
+            audit_scope = "PRIMARY"
 
     if not rows:
-        raise SystemExit("No candidates. Run process_video.py first.")
+        raise SystemExit("No candidates in selected audit scope. Run process_video.py first.")
 
     source = RAW / video["relpath"]
     wav_path = AUDIO / f"video_{args.video_id:04d}.wav"
@@ -234,10 +248,15 @@ def main():
         record = {
             "sample_no": sample_no,
             "candidate_id": int(row["id"]),
+            "review_tier": row["review_tier"],
+            "review_score": float(row["review_score"] or 0.0),
             "candidate_start": float(row["start_sec"]),
             "candidate_end": float(row["end_sec"]),
             "candidate_peak": peak,
             "score": float(row["score"] or 0.0),
+            "trigger_count": int(row["trigger_count"] or 1),
+            "detector_flatness": float(row["spectral_flatness"] or 0.0),
+            "tonal_penalty": float(row["tonal_penalty"] or 0.0),
             "context_start": round(start, 3),
             "context_end": round(end, 3),
             "before_frame_sec": round(before_t, 3),
@@ -250,7 +269,7 @@ def main():
             "spectrogram": spec.name,
         }
         records.append(record)
-        print(f"[{sample_no}/{len(selected)}] candidate {row['id']} peak={peak:.3f}s")
+        print(f"[{sample_no}/{len(selected)}] {row['review_tier']} candidate {row['id']} peak={peak:.3f}s")
 
     manifest = out_dir / "audit_static_manifest.csv"
     with manifest.open("w", newline="", encoding="utf-8-sig") as f:
@@ -270,10 +289,10 @@ def main():
         for row_index, rec in enumerate(chunk):
             y0 = row_index * ROW_H
             label = (
-                f"S{rec['sample_no']:02d}  C{rec['candidate_id']}  "
-                f"peak={rec['candidate_peak']:.3f}s  score={rec['score']:.3f}  "
-                f"prom={rec['peak_prominence_db']:.1f}dB  centroid={rec['centroid_hz']:.0f}Hz  "
-                f"flat={rec['flatness']:.3f}"
+                f"S{rec['sample_no']:02d} C{rec['candidate_id']} {rec['review_tier']} "
+                f"peak={rec['candidate_peak']:.3f}s score={rec['score']:.2f} "
+                f"review={rec['review_score']:.2f} trig={rec['trigger_count']} "
+                f"flat={rec['detector_flatness']:.3f}"
             )
             draw.rectangle((0, y0, SPEC_W, y0 + LABEL_H), fill=(20, 20, 20))
             draw.text((10, y0 + 8), label, font=font, fill="white")
@@ -292,7 +311,6 @@ def main():
             spec_y = y0 + LABEL_H + FRAME_H
             canvas.paste(spec, (0, spec_y))
 
-            # Candidate peak marker in the 3 s context spectrogram.
             rel = (rec["candidate_peak"] - rec["context_start"]) / max(1e-9, (rec["context_end"] - rec["context_start"]))
             x = int(np.clip(rel, 0.0, 1.0) * (SPEC_W - 1))
             d3 = ImageDraw.Draw(canvas)
@@ -309,7 +327,8 @@ def main():
     readme.write_text(
         "Static detector audit packet\n"
         f"Video ID: {args.video_id}\n"
-        f"Samples: {len(records)} / {len(rows)}\n"
+        f"Audit scope: {audit_scope}\n"
+        f"Samples: {len(records)} / {len(rows)} eligible candidates\n"
         f"Context: {args.context:.2f} s around candidate peak\n"
         "Each row: frame before / peak / after, then a 3-second spectrogram.\n"
         "The white vertical line in the spectrogram marks the detector peak.\n",
@@ -318,11 +337,12 @@ def main():
 
     print()
     print("STATIC AUDIT PACKET CREATED")
+    print(f"Audit scope: {audit_scope}")
     print(f"Manifest: {export_manifest}")
     for p in sheet_paths:
         print(f"Sheet   : {p}")
     print(f"README  : {readme}")
-    print("Upload the four PNG sheets and manifest for detector audit.")
+    print("Upload the PNG sheets and manifest for Detector V0.2 audit.")
 
 
 if __name__ == "__main__":
