@@ -14,14 +14,45 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _decode_process_bytes(data: bytes) -> str:
+    """Decode FFmpeg-family output deterministically on Windows.
+
+    FFmpeg/FFprobe JSON and diagnostics are UTF-8 in our workflow, but
+    subprocess(text=True) otherwise asks Python to use the active Windows
+    ANSI code page (for example cp1252). A Unicode media filename can then
+    crash the reader thread before we ever see ffprobe's JSON. Decode bytes
+    ourselves and replace only malformed diagnostic bytes if any exist.
+    """
+    if not data:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
 def ffprobe(path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
         "-show_streams", "-show_format",
         "-of", "json", str(path),
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    data = json.loads(p.stdout)
+
+    # Deliberately capture BYTES. Do not use text=True here: on Windows it
+    # may decode with cp1252/cp1258 and fail on Korean/Japanese/etc filenames.
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    stdout = _decode_process_bytes(p.stdout)
+    stderr = _decode_process_bytes(p.stderr)
+
+    if p.returncode != 0:
+        detail = stderr.strip() or f"ffprobe exited with code {p.returncode}"
+        raise RuntimeError(f"ffprobe failed for {path.name!r}: {detail}")
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        preview = stdout[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"ffprobe returned invalid JSON for {path.name!r}: {preview!r}"
+        ) from exc
+
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
     audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
 
@@ -29,12 +60,22 @@ def ffprobe(path: Path) -> dict:
     if video:
         raw = video.get("avg_frame_rate") or video.get("r_frame_rate")
         if raw and raw != "0/0":
-            n, d = raw.split("/")
-            fps = float(n) / float(d)
+            try:
+                n, d = raw.split("/")
+                d_value = float(d)
+                if d_value != 0:
+                    fps = float(n) / d_value
+            except (ValueError, ZeroDivisionError):
+                fps = None
 
     duration = data.get("format", {}).get("duration")
+    try:
+        duration_sec = float(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_sec = None
+
     return {
-        "duration_sec": float(duration) if duration else None,
+        "duration_sec": duration_sec,
         "width": int(video["width"]) if video and video.get("width") else None,
         "height": int(video["height"]) if video and video.get("height") else None,
         "fps": fps,
