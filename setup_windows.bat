@@ -1,5 +1,7 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
+chcp 65001 >nul
+set "PYTHONUTF8=1"
 cd /d "%~dp0"
 set "LOG=%~dp0setup_log.txt"
 
@@ -39,13 +41,33 @@ echo ==================================================
 echo Working directory: %CD%
 echo.
 
-echo [1/6] Checking Python...
-where python
-if errorlevel 1 (
-  echo ERROR: Python is not available in PATH.
+echo [1/6] Selecting Python 3.11...
+set "PYEXE="
+
+where py >nul 2>nul
+if !errorlevel! equ 0 (
+  for /f "usebackq delims=" %%P in (`py -3.11 -c "import sys; print(sys.executable)" 2^>nul`) do (
+    if not defined PYEXE set "PYEXE=%%P"
+  )
+)
+
+if not defined PYEXE (
+  for /f "delims=" %%P in ('where python 2^>nul') do (
+    if not defined PYEXE (
+      "%%P" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+      if !errorlevel! equ 0 set "PYEXE=%%P"
+    )
+  )
+)
+
+if not defined PYEXE (
+  echo ERROR: Python 3.11 was not found.
+  echo Install Python 3.11 x64 and run setup again.
   exit /b 1
 )
-python --version
+
+echo Selected Python: !PYEXE!
+"!PYEXE!" --version
 if errorlevel 1 exit /b 1
 
 echo.
@@ -76,15 +98,27 @@ if errorlevel 1 (
 )
 
 echo.
-echo [4/6] Creating Python virtual environment...
+echo [4/6] Creating Python 3.11 virtual environment...
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,11) else 1)" >nul 2>&1
+  if !errorlevel! neq 0 (
+    echo Existing .venv is not Python 3.11 - rebuilding it.
+    rmdir /s /q ".venv"
+    if exist ".venv" (
+      echo ERROR: Could not remove old .venv.
+      exit /b 4
+    )
+  )
+)
+
 if not exist ".venv\Scripts\python.exe" (
-  python -m venv .venv
+  "!PYEXE!" -m venv .venv
   if errorlevel 1 (
-    echo ERROR: Could not create .venv
+    echo ERROR: Could not create .venv with Python 3.11.
     exit /b 4
   )
 ) else (
-  echo Existing .venv found - reusing it.
+  echo Existing Python 3.11 .venv found - reusing it.
 )
 
 call ".venv\Scripts\activate.bat"
@@ -92,6 +126,7 @@ if errorlevel 1 (
   echo ERROR: Could not activate .venv
   exit /b 5
 )
+python --version
 
 echo.
 echo [5/6] Installing Python dependencies...
