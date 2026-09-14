@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sfx532.db import connect
+from sfx532.db import connect, init_db
 
 
 def percentile(values, p):
@@ -40,11 +40,32 @@ def union_duration(intervals):
     return total
 
 
+def _summary(rows, duration):
+    if not rows:
+        return None
+    lengths = [float(r["end_sec"] - r["start_sec"]) for r in rows]
+    scores = [float(r["score"] or 0.0) for r in rows]
+    review_scores = [float(r["review_score"] or 0.0) for r in rows]
+    summed = sum(lengths)
+    union = union_duration([(r["start_sec"], r["end_sec"]) for r in rows])
+    return {
+        "count": len(rows),
+        "rate": len(rows) / duration * 60.0 if duration > 0 else 0.0,
+        "summed": summed,
+        "union": union,
+        "overlap": max(0.0, summed - union),
+        "lengths": lengths,
+        "scores": scores,
+        "review_scores": review_scores,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video-id", type=int, required=True)
     args = ap.parse_args()
 
+    init_db()
     with connect() as con:
         video = con.execute("SELECT * FROM videos WHERE id=?", (args.video_id,)).fetchone()
         if not video:
@@ -55,40 +76,59 @@ def main():
         ).fetchall()
 
     duration = float(video["duration_sec"] or 0.0)
-    count = len(rows)
-    if count == 0:
+    if not rows:
         print("No candidates found.")
         return
 
-    lengths = [float(r["end_sec"] - r["start_sec"]) for r in rows]
-    scores = [float(r["score"] or 0.0) for r in rows]
-    summed = sum(lengths)
-    union = union_duration([(r["start_sec"], r["end_sec"]) for r in rows])
-    overlap = max(0.0, summed - union)
-    rate_min = count / duration * 60.0 if duration > 0 else 0.0
+    primary = [r for r in rows if (r["review_tier"] or "PRIMARY") == "PRIMARY"]
+    secondary = [r for r in rows if (r["review_tier"] or "PRIMARY") != "PRIMARY"]
 
-    print("SFX 532 Candidate Report")
-    print("=" * 60)
-    print(f"Video ID                : {args.video_id}")
-    print(f"File                    : {video['filename']}")
-    print(f"Duration                : {duration:.3f} s")
-    print(f"Candidates              : {count}")
-    print(f"Candidates / minute     : {rate_min:.2f}")
-    print(f"Duration sum            : {summed:.3f} s  (counts overlap more than once)")
-    print(f"Union coverage          : {union:.3f} s")
-    print(f"Union coverage ratio    : {(union/duration*100.0 if duration else 0):.1f}%")
-    print(f"Overlapped duration sum : {overlap:.3f} s")
+    all_stats = _summary(rows, duration)
+    primary_stats = _summary(primary, duration)
+
+    print("SFX 532 Candidate Report — Detector V0.2")
+    print("=" * 64)
+    print(f"Video ID                  : {args.video_id}")
+    print(f"File                      : {video['filename']}")
+    print(f"Duration                  : {duration:.3f} s")
+    print(f"All retained candidates   : {len(rows)}")
+    print(f"PRIMARY review candidates : {len(primary)}")
+    print(f"SECONDARY metadata only   : {len(secondary)}")
+    print(f"PRIMARY / minute          : {(len(primary)/duration*60.0 if duration else 0):.2f}")
     print()
-    print("Candidate length (s)")
-    print(f"  min / median / max    : {min(lengths):.3f} / {statistics.median(lengths):.3f} / {max(lengths):.3f}")
-    print(f"  P10 / P25 / P75 / P90: {percentile(lengths,10):.3f} / {percentile(lengths,25):.3f} / {percentile(lengths,75):.3f} / {percentile(lengths,90):.3f}")
+
+    print("All retained candidates")
+    print(f"  Duration sum            : {all_stats['summed']:.3f} s")
+    print(f"  Union coverage          : {all_stats['union']:.3f} s")
+    print(f"  Union coverage ratio    : {(all_stats['union']/duration*100.0 if duration else 0):.1f}%")
+    print(f"  Overlapped duration sum : {all_stats['overlap']:.3f} s")
     print()
-    print("Detector score")
-    print(f"  min / median / max    : {min(scores):.3f} / {statistics.median(scores):.3f} / {max(scores):.3f}")
-    print(f"  P10 / P25 / P75 / P90 / P95: {percentile(scores,10):.3f} / {percentile(scores,25):.3f} / {percentile(scores,75):.3f} / {percentile(scores,90):.3f} / {percentile(scores,95):.3f}")
+
+    if primary_stats:
+        lengths = primary_stats["lengths"]
+        scores = primary_stats["scores"]
+        review_scores = primary_stats["review_scores"]
+        print("PRIMARY candidate length (s)")
+        print(f"  min / median / max      : {min(lengths):.3f} / {statistics.median(lengths):.3f} / {max(lengths):.3f}")
+        print(f"  P10 / P25 / P75 / P90  : {percentile(lengths,10):.3f} / {percentile(lengths,25):.3f} / {percentile(lengths,75):.3f} / {percentile(lengths,90):.3f}")
+        print()
+        print("PRIMARY detector score")
+        print(f"  min / median / max      : {min(scores):.3f} / {statistics.median(scores):.3f} / {max(scores):.3f}")
+        print(f"  review score median     : {statistics.median(review_scores):.3f}")
+        print(f"  review P10 / P90        : {percentile(review_scores,10):.3f} / {percentile(review_scores,90):.3f}")
+        print()
+        print(f"PRIMARY union coverage    : {primary_stats['union']:.3f} s")
+        print(f"PRIMARY coverage ratio    : {(primary_stats['union']/duration*100.0 if duration else 0):.1f}%")
+
+    clustered = sum(1 for r in rows if int(r["trigger_count"] or 1) > 1)
+    tonal = sum(1 for r in rows if float(r["tonal_penalty"] or 0.0) > 0)
     print()
-    print("Important: candidate count/coverage alone cannot decide true SFX precision.")
-    print("Use an audit reel with visual context before tuning detector thresholds.")
+    print(f"Candidates merged from multiple triggers : {clustered}")
+    print(f"Candidates receiving tonal down-rank      : {tonal}")
+    print()
+    print("PRIMARY = generate WAV/MP4/frames and review first.")
+    print("SECONDARY = timestamp/features stay in SQLite; not discarded.")
+    print("Do not compare only total count with V0.1; compare PRIMARY precision and recall.")
 
 
 if __name__ == "__main__":
