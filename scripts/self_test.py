@@ -56,8 +56,8 @@ def schema_test():
     if version != SCHEMA_VERSION:
         raise RuntimeError(f"schema version mismatch: db={version}, code={SCHEMA_VERSION}")
     if missing:
-        raise RuntimeError(f"schema 3 migration missing columns: {sorted(missing)}")
-    print(f"PASS: SQLite schema {version} includes Detector V0.2 review fields")
+        raise RuntimeError(f"schema migration missing columns: {sorted(missing)}")
+    print(f"PASS: SQLite schema {version} includes Detector V0.2.x review fields")
 
 
 def synthetic_detector_test():
@@ -72,11 +72,13 @@ def synthetic_detector_test():
         events = detect_candidates(transient_path)
         if not events or not any(e["start_sec"] <= 0.9 <= e["end_sec"] for e in events):
             raise RuntimeError("candidate detector failed synthetic transient test")
-        if not all(e["detector"].endswith("v0.2") for e in events):
-            raise RuntimeError("Detector V0.2 identifier missing")
+        if not all(e["detector"].endswith("v0.2.1") for e in events):
+            raise RuntimeError("Detector V0.2.1 identifier missing")
         if not all(e["review_tier"] in {"PRIMARY", "SECONDARY"} for e in events):
-            raise RuntimeError("Detector V0.2 review tier missing")
-        print(f"PASS: Detector V0.2 found {len(events)} candidate(s) around synthetic transient")
+            raise RuntimeError("Detector V0.2.1 review tier missing")
+        if any(float(e["tonal_penalty"]) != 0.0 for e in events):
+            raise RuntimeError("V0.2.1 production config/test path must not apply tonal penalty")
+        print(f"PASS: Detector V0.2.1 found {len(events)} candidate(s) around synthetic transient")
 
         silence_path = td / "silence.wav"
         _write_wav(silence_path, np.zeros(sr * 3, dtype=np.float32), sr)
@@ -85,6 +87,8 @@ def synthetic_detector_test():
             raise RuntimeError("silence must not become an event candidate")
         print("PASS: silence produces no candidate")
 
+        # Two sub-peaks from essentially the same hit should not explode into
+        # many fragments.
         double_hit = np.zeros(sr * 2, dtype=np.float32)
         double_hit[int(0.80 * sr):int(0.83 * sr)] = 0.9
         double_hit[int(0.94 * sr):int(0.97 * sr)] = 0.7
@@ -92,10 +96,25 @@ def synthetic_detector_test():
         _write_wav(double_path, double_hit, sr)
         clustered = detect_candidates(double_path)
         if not clustered:
-            raise RuntimeError("cluster test produced no candidate")
+            raise RuntimeError("duplicate-fragment cluster test produced no candidate")
         if len(clustered) > 2:
-            raise RuntimeError("nearby transient fragments were not clustered")
-        print("PASS: nearby transient fragments are clustered")
+            raise RuntimeError("nearby duplicate fragments were not controlled")
+        print("PASS: nearby duplicate fragments are controlled")
+
+        # Three distinct cartoon cues spaced hundreds of milliseconds apart must
+        # not chain into one multi-second candidate just because pre/post padding
+        # makes their intervals overlap.
+        separate = np.zeros(sr * 3, dtype=np.float32)
+        for t, amp in [(0.55, 0.9), (1.05, 0.75), (1.55, 0.85)]:
+            separate[int(t * sr):int((t + 0.035) * sr)] = amp
+        separate_path = td / "separate_cues.wav"
+        _write_wav(separate_path, separate, sr)
+        cues = detect_candidates(separate_path)
+        if len(cues) < 2:
+            raise RuntimeError("distinct cues were chain-merged too aggressively")
+        if max(float(e["end_sec"] - e["start_sec"]) for e in cues) > 2.0:
+            raise RuntimeError("synthetic cue event became implausibly long")
+        print("PASS: distinct nearby cues do not chain-merge")
 
 
 def main():
