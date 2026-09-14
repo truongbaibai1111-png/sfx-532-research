@@ -8,7 +8,7 @@ def _read_pcm16_mono(path):
         ch = w.getnchannels()
         sw = w.getsampwidth()
         if sw != 2:
-            raise ValueError("Detector V0.1 expects PCM16 WAV")
+            raise ValueError("Detector V0.2 expects PCM16 WAV")
         raw = w.readframes(w.getnframes())
 
     x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
@@ -31,6 +31,7 @@ def _features(x, sr, window_ms, hop_ms):
 
     rms = np.empty(len(starts), dtype=np.float32)
     spectral_flux = np.zeros(len(starts), dtype=np.float32)
+    spectral_flatness = np.ones(len(starts), dtype=np.float32)
     window = np.hanning(win).astype(np.float32)
     previous_mag = None
 
@@ -42,14 +43,78 @@ def _features(x, sr, window_ms, hop_ms):
         rms[i] = np.sqrt(np.mean(frame * frame) + 1e-12)
 
         mag = np.abs(np.fft.rfft(frame * window)).astype(np.float32)
-        norm = float(np.linalg.norm(mag) + 1e-8)
-        mag /= norm
-        if previous_mag is not None:
-            positive_change = np.maximum(mag - previous_mag, 0.0)
-            spectral_flux[i] = float(np.sqrt(np.sum(positive_change * positive_change)))
-        previous_mag = mag
+        power = mag * mag + 1e-12
+        spectral_flatness[i] = float(
+            np.exp(np.mean(np.log(power))) / (np.mean(power) + 1e-12)
+        )
 
-    return starts, rms, spectral_flux
+        norm = float(np.linalg.norm(mag) + 1e-8)
+        mag_norm = mag / norm
+        if previous_mag is not None:
+            positive_change = np.maximum(mag_norm - previous_mag, 0.0)
+            spectral_flux[i] = float(np.sqrt(np.sum(positive_change * positive_change)))
+        previous_mag = mag_norm
+
+    return starts, rms, spectral_flux, spectral_flatness
+
+
+def _merge_intervals(active_idx, hop_ms, merge_gap_ms):
+    if len(active_idx) == 0:
+        return []
+
+    intervals = []
+    first = previous = int(active_idx[0])
+    merge_frames = max(1, int(round(merge_gap_ms / hop_ms)))
+
+    for idx in active_idx[1:]:
+        idx = int(idx)
+        if idx - previous <= merge_frames:
+            previous = idx
+        else:
+            intervals.append((first, previous))
+            first = previous = idx
+    intervals.append((first, previous))
+    return intervals
+
+
+def _cluster_candidates(candidates, cluster_gap_ms, cluster_peak_ms):
+    """Merge tiny neighbouring detector fragments without deleting weak cues.
+
+    V0.1 often produced several sub-second candidates for one cartoon action.
+    V0.2 treats nearby fragments as one research event, keeping the strongest
+    peak as the representative synchronization point.
+    """
+    if not candidates:
+        return []
+
+    gap_limit = float(cluster_gap_ms) / 1000.0
+    peak_limit = float(cluster_peak_ms) / 1000.0
+    ordered = sorted(candidates, key=lambda e: (e["start_sec"], e["peak_sec"]))
+    groups = [[ordered[0]]]
+
+    for event in ordered[1:]:
+        group = groups[-1]
+        prev = group[-1]
+        interval_gap = float(event["start_sec"]) - float(prev["end_sec"])
+        peak_gap = float(event["peak_sec"]) - float(prev["peak_sec"])
+        if interval_gap <= gap_limit or peak_gap <= peak_limit:
+            group.append(event)
+        else:
+            groups.append([event])
+
+    merged = []
+    for group in groups:
+        strongest = max(group, key=lambda e: float(e["score"]))
+        flatness_values = [float(e["spectral_flatness"]) for e in group]
+        merged.append({
+            "start_sec": round(min(float(e["start_sec"]) for e in group), 3),
+            "end_sec": round(max(float(e["end_sec"]) for e in group), 3),
+            "peak_sec": round(float(strongest["peak_sec"]), 3),
+            "score": round(max(float(e["score"]) for e in group), 4),
+            "spectral_flatness": round(float(np.median(flatness_values)), 4),
+            "trigger_count": int(sum(int(e.get("trigger_count", 1)) for e in group)),
+        })
+    return merged
 
 
 def detect_candidates(
@@ -58,21 +123,28 @@ def detect_candidates(
     hop_ms=10,
     min_event_ms=80,
     max_event_ms=6000,
-    merge_gap_ms=120,
-    energy_percentile=82,
+    merge_gap_ms=220,
+    cluster_gap_ms=180,
+    cluster_peak_ms=220,
+    energy_percentile=85,
     noise_percentile=20,
-    noise_margin_db=8.0,
-    absolute_floor_db=-75.0,
-    onset_z=2.8,
-    spectral_flux_z=3.2,
+    noise_margin_db=10.0,
+    absolute_floor_db=-72.0,
+    onset_z=3.0,
+    spectral_flux_z=3.3,
     pre_roll_ms=120,
     post_roll_ms=220,
+    tonal_flatness_threshold=0.35,
+    tonal_penalty_max=1.5,
+    primary_score_threshold=2.8,
 ):
     sr, x = _read_pcm16_mono(wav_path)
     if len(x) == 0:
         return []
 
-    starts, rms, spectral_flux = _features(x, sr, window_ms, hop_ms)
+    starts, rms, spectral_flux, spectral_flatness = _features(
+        x, sr, window_ms, hop_ms
+    )
     log_energy = 20.0 * np.log10(rms + 1e-7)
 
     energy_delta = np.diff(log_energy, prepend=log_energy[0])
@@ -87,12 +159,15 @@ def detect_candidates(
         float(absolute_floor_db),
     )
 
-    # Three complementary triggers:
-    # 1) sustained energy clearly above the track's noise/background floor,
-    # 2) sudden broadband level increase,
-    # 3) sudden spectral/timbral change even when total loudness barely changes.
+    # V0.2 does not allow sustained music energy by itself to keep an event
+    # continuously active. High energy must be accompanied by some local change,
+    # while a strong onset/flux can still trigger a quiet cartoon cue.
+    moderate_change = (
+        (onset_score >= onset_z * 0.60)
+        | (flux_score >= spectral_flux_z * 0.60)
+    )
     active = (
-        (log_energy >= energy_threshold)
+        ((log_energy >= energy_threshold) & moderate_change)
         | (onset_score >= onset_z)
         | (flux_score >= spectral_flux_z)
     )
@@ -101,20 +176,8 @@ def detect_candidates(
     if len(active_idx) == 0:
         return []
 
-    intervals = []
-    first = previous = int(active_idx[0])
-    merge_frames = max(1, int(merge_gap_ms / hop_ms))
-
-    for idx in active_idx[1:]:
-        idx = int(idx)
-        if idx - previous <= merge_frames:
-            previous = idx
-        else:
-            intervals.append((first, previous))
-            first = previous = idx
-    intervals.append((first, previous))
-
-    output = []
+    intervals = _merge_intervals(active_idx, hop_ms, merge_gap_ms)
+    raw_candidates = []
     audio_duration = len(x) / sr
 
     for left, right in intervals:
@@ -147,13 +210,49 @@ def detect_candidates(
             local_onset = float(np.max(onset_score[ia:ib])) if ib > ia else 0.0
             local_flux = float(np.max(flux_score[ia:ib])) if ib > ia else 0.0
             score = max(local_onset, local_flux)
+            flatness = float(np.median(spectral_flatness[ia:ib])) if ib > ia else 1.0
 
-            output.append({
-                "start_sec": round(chunk_start, 3),
-                "end_sec": round(chunk_end, 3),
-                "peak_sec": round(peak_sec, 3),
-                "score": round(score, 4),
-                "detector": "energy_onset_flux_v0.1",
+            raw_candidates.append({
+                "start_sec": float(chunk_start),
+                "end_sec": float(chunk_end),
+                "peak_sec": float(peak_sec),
+                "score": float(score),
+                "spectral_flatness": flatness,
+                "trigger_count": 1,
             })
+
+    clustered = _cluster_candidates(
+        raw_candidates,
+        cluster_gap_ms=cluster_gap_ms,
+        cluster_peak_ms=cluster_peak_ms,
+    )
+
+    output = []
+    for event in clustered:
+        flatness = float(event["spectral_flatness"])
+        if tonal_flatness_threshold > 0 and flatness < tonal_flatness_threshold:
+            tonal_ratio = min(
+                1.0,
+                max(0.0, (tonal_flatness_threshold - flatness) / tonal_flatness_threshold),
+            )
+            tonal_penalty = tonal_ratio * float(tonal_penalty_max)
+        else:
+            tonal_penalty = 0.0
+
+        review_score = max(0.0, float(event["score"]) - tonal_penalty)
+        review_tier = "PRIMARY" if review_score >= primary_score_threshold else "SECONDARY"
+
+        output.append({
+            "start_sec": round(float(event["start_sec"]), 3),
+            "end_sec": round(float(event["end_sec"]), 3),
+            "peak_sec": round(float(event["peak_sec"]), 3),
+            "score": round(float(event["score"]), 4),
+            "review_score": round(review_score, 4),
+            "review_tier": review_tier,
+            "trigger_count": int(event["trigger_count"]),
+            "spectral_flatness": round(flatness, 4),
+            "tonal_penalty": round(float(tonal_penalty), 4),
+            "detector": "energy_onset_flux_cluster_v0.2",
+        })
 
     return output
