@@ -51,15 +51,24 @@ def main():
             stat = path.stat()
             old = con.execute("SELECT * FROM videos WHERE relpath=?", (rel,)).fetchone()
 
-            # Fast path: unchanged size + nanosecond mtime means no expensive re-hash.
-            if old and old["size_bytes"] == stat.st_size and old["mtime_ns"] == stat.st_mtime_ns:
+            # Fast path is valid ONLY for previously validated files. A row marked
+            # INVALID must be re-probed, because the cause may have been a tool bug
+            # rather than damaged media (for example a Unicode decode failure).
+            unchanged_stat = (
+                old
+                and old["size_bytes"] == stat.st_size
+                and old["mtime_ns"] == stat.st_mtime_ns
+            )
+            if unchanged_stat and old["ingest_status"] == "VALIDATED":
                 print(f"[{index}/{len(videos)}] UNCHANGED: {rel}")
                 continue
 
             sha = sha256_file(path)
 
-            # Timestamp changed but bytes did not. Keep all derived research.
-            if old and old["sha256"] == sha:
+            # Timestamp changed but bytes did not. Validated rows can keep all
+            # derived research. Invalid rows still need a fresh ffprobe attempt.
+            same_bytes = old and old["sha256"] == sha
+            if same_bytes and old["ingest_status"] == "VALIDATED":
                 con.execute(
                     """
                     UPDATE videos
@@ -76,7 +85,12 @@ def main():
             process_status = "PENDING" if probe_error is None else "INVALID"
 
             if old:
-                invalidate_derived(con, old["id"])
+                # Invalidate derived data only when the raw bytes changed. If the
+                # bytes are identical and we are merely recovering an INVALID row,
+                # there should be no trusted derived data to delete.
+                if not same_bytes:
+                    invalidate_derived(con, old["id"])
+
                 con.execute(
                     """
                     UPDATE videos
@@ -102,7 +116,10 @@ def main():
                         old["id"],
                     ),
                 )
-                status = "CHANGED" if probe_error is None else "CHANGED_INVALID"
+                if probe_error is None:
+                    status = "RECOVERED" if same_bytes else "CHANGED"
+                else:
+                    status = "STILL_INVALID" if same_bytes else "CHANGED_INVALID"
             else:
                 con.execute(
                     """
