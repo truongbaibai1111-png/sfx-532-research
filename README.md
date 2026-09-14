@@ -2,31 +2,25 @@
 
 Bộ công cụ nghiên cứu sound effect cho 532 video hoạt hình không lời, chạy local và không phụ thuộc Gemini/OpenAI/Freesound API.
 
-## Production V0.1
+## Detector V0.2
 
-V0.1 xây nền dữ liệu và candidate extraction đủ bền để kiểm thử trên video thật trước khi gắn model AI local.
+V0.2 được xây sau khi audit thủ công 24 mẫu của video 001. Mục tiêu là giữ recall cao nhưng giảm over-segmentation và không tạo hàng trăm file media nặng cho mọi transient.
 
-Đã có:
+Điểm mới:
 
-- Quét video cục bộ bằng FFprobe.
-- SHA256 + size + mtime để nhận biết file thật sự thay đổi nhưng không hash lại 532 video mỗi lần chạy.
-- Một file media lỗi không làm cả lượt scan dừng.
-- SQLite có schema version + migration additive.
-- Trích audio mono PCM16 16 kHz bằng FFmpeg.
-- Candidate detector local: energy + onset + spectral flux, có noise-floor guard để đoạn im lặng không bị coi là event.
-- Mỗi candidate sinh đủ:
-  - WAV;
-  - MP4 ngắn;
-  - frame trước cue;
-  - frame tại peak;
-  - frame sau cue;
-  - timestamp + score.
-- Resume/checkpoint theo từng video.
-- Dữ liệu đã review về sau được bảo vệ khỏi việc vô tình regenerate candidate.
-- Tách dữ liệu nghe được khỏi đề xuất sound design sáng tạo.
-- Xuất CSV để kiểm tra hoặc đưa cho ChatGPT nghiên cứu tiếp.
+- Energy + onset + spectral flux vẫn là ba nguồn tín hiệu chính.
+- Sustained high energy không còn tự giữ một event active nếu không có thay đổi cục bộ.
+- Tăng merge gap và thêm clustering/NMS giữa các fragment gần nhau.
+- Tính spectral flatness để down-rank cue quá tonal thay vì xóa cứng.
+- Chia candidate thành hai tầng:
+  - `PRIMARY`: review-ready, sinh WAV + MP4 + 3 frame.
+  - `SECONDARY`: vẫn lưu timestamp/features trong SQLite nhưng không sinh file media nặng.
+- Candidate ở vài giây cuối video được hạ xuống SECONDARY để giảm title/end-card sting; dữ liệu không bị xóa.
+- SQLite schema 3 thêm `review_score`, `review_tier`, `trigger_count`, `spectral_flatness`, `tonal_penalty`.
+- Pipeline tự migrate database cũ theo kiểu additive.
+- `candidate_report.py` báo riêng ALL / PRIMARY / SECONDARY và union coverage.
 
-## Kiến trúc
+## Kiến trúc hiện tại
 
 ```text
 532 video gốc
@@ -37,138 +31,84 @@ SQLite manifest
     ↓
 FFmpeg audio extraction
     ↓
-Energy + onset + spectral-flux detector
+Detector V0.2
+energy + onset + spectral flux
     ↓
-Event package
-(WAV + MP4 + 3 frames + timestamp)
+merge + clustering + soft tonal ranking
     ↓
-Review / research
+ALL RETAINED CANDIDATES
+    ├── PRIMARY → WAV + MP4 + 3 frames → review trước
+    └── SECONDARY → metadata only → giữ để phục hồi recall
+    ↓
+Research / labeling
     ↓
 Cartoon SFX knowledge base
-    ↓
-Semantic search local (giai đoạn tiếp theo)
 ```
 
 ## Yêu cầu
 
 - Windows 10/11 hoặc Linux
-- Python 3.10+
-- FFmpeg + FFprobe có trong PATH
+- Python 3.11 được khuyến nghị
+- FFmpeg + FFprobe trong PATH
 
-## Cài đặt nhanh trên Windows
-
-Clone repo:
-
-```bat
-git clone https://github.com/truongbaibai1111-png/sfx-532-research.git
-cd sfx-532-research
-```
-
-Sau đó chạy:
+## Cài đặt Windows
 
 ```bat
 setup_windows.bat
 ```
 
-File này sẽ:
+Setup sẽ chọn Python 3.11 nếu có, tạo `.venv`, cài dependency và chạy self-test.
 
-1. kiểm tra Python;
-2. kiểm tra FFmpeg/FFprobe;
-3. tạo `.venv`;
-4. cài dependency;
-5. tạo SQLite;
-6. chạy self-test synthetic, gồm cả kiểm tra silence.
+## Kiểm thử video 001 sau khi nâng V0.2
 
-Nếu muốn cài thủ công:
+Không chạy 532 video ngay.
 
-```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python scripts\self_test.py
-```
-
-## Bước kiểm thử bắt buộc trước 532 video
-
-Không chép cả 532 video vào để chạy batch ngay.
-
-Đầu tiên chỉ chép **1 video đại diện** vào:
+Giữ video 001 trong:
 
 ```text
 data/raw_videos/
 ```
 
-Sau đó:
+Chạy:
 
 ```bat
 .venv\Scripts\activate
-python scripts\scan_videos.py
-python scripts\status.py
 python scripts\process_video.py --video-id 1
-python scripts\export_csv.py
+python scripts\status.py
+python scripts\candidate_report.py --video-id 1
 ```
 
-Candidate của video 1 nằm tại:
+`process_video.py` được phép regenerate khi video đang ở trạng thái `CANDIDATES_READY`. Nó sẽ xóa event package cũ của video đó và tạo lại theo V0.2. Các trạng thái `RESEARCHED`, `INDEXED`, `COMPLETE` vẫn được bảo vệ khỏi regenerate ngoài ý muốn.
 
-```text
-data/derived/events/video_0001/
-```
+Kết quả V0.2 cần được đánh giá theo:
 
-Mỗi candidate có dạng:
+- số ALL candidates;
+- số PRIMARY;
+- số SECONDARY;
+- PRIMARY/minute;
+- union coverage;
+- số candidate được cluster từ nhiều trigger;
+- precision/recall của một audit sample mới.
 
-```text
-event_0001.wav
-event_0001.mp4
-event_0001_before.jpg
-event_0001_peak.jpg
-event_0001_after.jpg
-```
-
-Quy trình đánh giá chi tiết nằm ở:
-
-```text
-docs/VALIDATION_PROTOCOL.md
-```
-
-Không chạy `scripts/process_all.py` cho 532 video trước khi detector đạt tiêu chí kiểm thử và được freeze version.
+Không đặt mục tiêu máy móc rằng tổng candidate phải xuống một con số cố định. Mục tiêu là PRIMARY sạch hơn trong khi SECONDARY vẫn giữ các cue yếu.
 
 ## Nguyên tắc dữ liệu
 
-1. Video gốc là immutable: chương trình không sửa video gốc.
-2. File được nhận diện bằng nội dung (SHA256), không chỉ filename.
-3. Lượt scan sau dùng size + mtime fast-path; chỉ hash lại file có dấu hiệu thay đổi.
-4. Nếu bytes video thay đổi, research derived từ bản cũ bị invalidate.
-5. Detector chỉ tạo **candidate**, không tự kết luận candidate là SFX.
-6. `HEARD_*` chỉ dùng cho âm thực sự có bằng chứng.
-7. `CREATIVE_ONLY` dùng cho đề xuất sound design, không giả vờ đó là âm nghe được trong video.
+1. Video gốc là immutable.
+2. File được nhận diện bằng SHA256 + size + mtime.
+3. Video thay đổi bytes sẽ invalidate dữ liệu derived cũ.
+4. Detector chỉ tạo candidate, không tự kết luận đó chắc chắn là SFX.
+5. `PRIMARY`/`SECONDARY` chỉ là thứ tự review, không phải nhãn true/false.
+6. `HEARD_*` chỉ dành cho âm có bằng chứng thật.
+7. `CREATIVE_ONLY` là đề xuất sound design, không được trộn với âm nghe được.
 8. Không đánh dấu `COMPLETE` khi stage bắt buộc chưa PASS.
-9. Database có schema version để nâng cấp mà không xóa dữ liệu nghiên cứu.
-
-## Trạng thái pipeline
-
-```text
-VALIDATED
-  ↓
-PENDING
-  ↓
-RUNNING
-  ↓
-CANDIDATES_READY
-  ↓
-RESEARCHED        (giai đoạn sau)
-  ↓
-INDEXED           (giai đoạn sau)
-  ↓
-COMPLETE          (giai đoạn sau)
-```
-
-File lỗi được đánh dấu `INVALID` và lượt scan tiếp tục với các file còn lại.
+9. Migration database phải additive, không xóa research đã có.
 
 ## Roadmap
 
-- V0.1 — ingest, integrity, event packages, detector, SQLite, CSV: **đang kiểm thử trên video thật**.
-- V0.2 — review UI local + đo precision/recall trên test set.
-- V0.3 — visual-motion candidate detector để không phụ thuộc riêng audio.
+- V0.1 — ingest, integrity, detector high-recall ban đầu: hoàn thành.
+- V0.2 — clustering + review tier + giảm file spam: **đang kiểm thử trên video 001**.
+- V0.3 — visual-motion/context reranking local.
 - V0.4 — multilingual semantic search local.
-- V0.5 — audio embedding local và hybrid reranking.
-- V1.0 — nhập tình huống hoạt hình → trả reference trong 532 video + SFX recipe + keyword tìm sound miễn phí.
+- V0.5 — audio embedding local + hybrid reranking.
+- V1.0 — nhập tình huống hoạt hình → reference trong 532 video + SFX recipe + keyword tìm sound miễn phí.
