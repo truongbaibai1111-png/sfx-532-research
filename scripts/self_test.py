@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sfx532.db import init_db
+from sfx532.db import init_db, connect, SCHEMA_VERSION
 from sfx532.detect import detect_candidates
 from sfx532.media import ffprobe
 from sfx532.paths import DB
@@ -32,12 +32,6 @@ def _write_wav(path, x, sr=16000):
 
 
 def unicode_ffprobe_test():
-    """Regression test for Windows Unicode media paths.
-
-    This specifically protects against subprocess trying to decode ffprobe
-    output with the active ANSI code page (cp1252/cp1258) when filenames
-    contain Korean/Vietnamese/etc characters.
-    """
     sr = 16000
     with tempfile.TemporaryDirectory() as td:
         media_path = Path(td) / "001_뒤통수_âm-thanh.wav"
@@ -48,6 +42,22 @@ def unicode_ffprobe_test():
         if meta["duration_sec"] is None:
             raise RuntimeError("ffprobe Unicode-path test did not return duration")
         print("PASS: ffprobe handles Unicode media filename")
+
+
+def schema_test():
+    required = {
+        "review_score", "review_tier", "trigger_count",
+        "spectral_flatness", "tonal_penalty",
+    }
+    with connect() as con:
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in con.execute("PRAGMA table_info(event_candidates)")}
+    missing = required - columns
+    if version != SCHEMA_VERSION:
+        raise RuntimeError(f"schema version mismatch: db={version}, code={SCHEMA_VERSION}")
+    if missing:
+        raise RuntimeError(f"schema 3 migration missing columns: {sorted(missing)}")
+    print(f"PASS: SQLite schema {version} includes Detector V0.2 review fields")
 
 
 def synthetic_detector_test():
@@ -62,7 +72,11 @@ def synthetic_detector_test():
         events = detect_candidates(transient_path)
         if not events or not any(e["start_sec"] <= 0.9 <= e["end_sec"] for e in events):
             raise RuntimeError("candidate detector failed synthetic transient test")
-        print(f"PASS: detector found {len(events)} candidate(s) around synthetic transient")
+        if not all(e["detector"].endswith("v0.2") for e in events):
+            raise RuntimeError("Detector V0.2 identifier missing")
+        if not all(e["review_tier"] in {"PRIMARY", "SECONDARY"} for e in events):
+            raise RuntimeError("Detector V0.2 review tier missing")
+        print(f"PASS: Detector V0.2 found {len(events)} candidate(s) around synthetic transient")
 
         silence_path = td / "silence.wav"
         _write_wav(silence_path, np.zeros(sr * 3, dtype=np.float32), sr)
@@ -70,6 +84,18 @@ def synthetic_detector_test():
         if silence_events:
             raise RuntimeError("silence must not become an event candidate")
         print("PASS: silence produces no candidate")
+
+        double_hit = np.zeros(sr * 2, dtype=np.float32)
+        double_hit[int(0.80 * sr):int(0.83 * sr)] = 0.9
+        double_hit[int(0.94 * sr):int(0.97 * sr)] = 0.7
+        double_path = td / "double_hit.wav"
+        _write_wav(double_path, double_hit, sr)
+        clustered = detect_candidates(double_path)
+        if not clustered:
+            raise RuntimeError("cluster test produced no candidate")
+        if len(clustered) > 2:
+            raise RuntimeError("nearby transient fragments were not clustered")
+        print("PASS: nearby transient fragments are clustered")
 
 
 def main():
@@ -85,6 +111,7 @@ def main():
     if not DB.exists():
         raise RuntimeError("SQLite database was not created")
     print(f"PASS: SQLite -> {DB}")
+    schema_test()
 
     unicode_ffprobe_test()
     synthetic_detector_test()
