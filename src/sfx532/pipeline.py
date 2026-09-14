@@ -47,16 +47,13 @@ def _apply_review_guards(event, video_duration, review_cfg):
     if force_last and video_duration and end_guard_sec > 0:
         remaining = float(video_duration) - float(event["peak_sec"])
         if remaining <= end_guard_sec:
-            # Do not delete end-card candidates. Keep them as metadata-only
-            # SECONDARY items so a genuine final action can still be recovered.
             tier = "SECONDARY"
 
     event["review_tier"] = tier
     return event
 
 
-def process_video(video_id: int) -> dict:
-    # Running a detector upgrade must also apply additive DB migrations.
+def process_video(video_id: int, package_artifacts: bool = True) -> dict:
     init_db()
     cfg = load_config()
     video_row = get_video(video_id)
@@ -93,7 +90,12 @@ def process_video(video_id: int) -> dict:
             )
             cur = con.execute(
                 "INSERT INTO pipeline_runs(video_id,stage,status,pipeline_version) VALUES (?,?,?,?)",
-                (video_id, "AUDIO_AND_CANDIDATES", "RUNNING", cfg["pipeline_version"]),
+                (
+                    video_id,
+                    "DETECT_ONLY" if not package_artifacts else "AUDIO_AND_CANDIDATES",
+                    "RUNNING",
+                    cfg["pipeline_version"],
+                ),
             )
             run_id = cur.lastrowid
 
@@ -115,6 +117,7 @@ def process_video(video_id: int) -> dict:
 
         primary_count = 0
         secondary_count = 0
+        artifacts_generated = 0
 
         with connect() as con:
             con.execute("DELETE FROM event_candidates WHERE video_id=?", (video_id,))
@@ -128,10 +131,7 @@ def process_video(video_id: int) -> dict:
 
                 audio_rel = video_rel = before_rel = peak_rel = after_rel = None
 
-                # Expensive media packaging is only for the review-ready tier.
-                # SECONDARY candidates remain queryable in SQLite with their
-                # timestamps and features, preserving recall without file spam.
-                if tier == "PRIMARY":
+                if package_artifacts and tier == "PRIMARY":
                     base = f"event_{index:04d}"
                     audio_clip = event_dir / f"{base}.wav"
                     video_clip = event_dir / f"{base}.mp4"
@@ -167,6 +167,7 @@ def process_video(video_id: int) -> dict:
                     before_rel = _data_relpath(frame_before)
                     peak_rel = _data_relpath(frame_peak)
                     after_rel = _data_relpath(frame_after)
+                    artifacts_generated += 1
 
                 con.execute(
                     """
@@ -212,7 +213,8 @@ def process_video(video_id: int) -> dict:
             "candidates": len(candidates),
             "primary": primary_count,
             "secondary": secondary_count,
-            "artifacts_generated": primary_count,
+            "artifacts_generated": artifacts_generated,
+            "mode": "FULL" if package_artifacts else "DETECT_ONLY",
             "detector": f"V{cfg['pipeline_version']}",
         }
 
