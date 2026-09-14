@@ -46,6 +46,7 @@ def _summary(rows, duration):
     lengths = [float(r["end_sec"] - r["start_sec"]) for r in rows]
     scores = [float(r["score"] or 0.0) for r in rows]
     review_scores = [float(r["review_score"] or 0.0) for r in rows]
+    flatness = [float(r["spectral_flatness"] or 0.0) for r in rows]
     summed = sum(lengths)
     union = union_duration([(r["start_sec"], r["end_sec"]) for r in rows])
     return {
@@ -57,6 +58,7 @@ def _summary(rows, duration):
         "lengths": lengths,
         "scores": scores,
         "review_scores": review_scores,
+        "flatness": flatness,
     }
 
 
@@ -86,11 +88,14 @@ def main():
     all_stats = _summary(rows, duration)
     primary_stats = _summary(primary, duration)
 
-    print("SFX 532 Candidate Report — Detector V0.2")
-    print("=" * 64)
+    detector_versions = sorted({str(r["detector"]) for r in rows})
+
+    print("SFX 532 Candidate Report — Detector V0.2.1")
+    print("=" * 66)
     print(f"Video ID                  : {args.video_id}")
     print(f"File                      : {video['filename']}")
     print(f"Duration                  : {duration:.3f} s")
+    print(f"Detector tag              : {', '.join(detector_versions)}")
     print(f"All retained candidates   : {len(rows)}")
     print(f"PRIMARY review candidates : {len(primary)}")
     print(f"SECONDARY metadata only   : {len(secondary)}")
@@ -108,6 +113,7 @@ def main():
         lengths = primary_stats["lengths"]
         scores = primary_stats["scores"]
         review_scores = primary_stats["review_scores"]
+        flats = primary_stats["flatness"]
         print("PRIMARY candidate length (s)")
         print(f"  min / median / max      : {min(lengths):.3f} / {statistics.median(lengths):.3f} / {max(lengths):.3f}")
         print(f"  P10 / P25 / P75 / P90  : {percentile(lengths,10):.3f} / {percentile(lengths,25):.3f} / {percentile(lengths,75):.3f} / {percentile(lengths,90):.3f}")
@@ -117,18 +123,25 @@ def main():
         print(f"  review score median     : {statistics.median(review_scores):.3f}")
         print(f"  review P10 / P90        : {percentile(review_scores,10):.3f} / {percentile(review_scores,90):.3f}")
         print()
+        print("PRIMARY short-time spectral flatness (diagnostic only)")
+        print(f"  min / median / max      : {min(flats):.5f} / {statistics.median(flats):.5f} / {max(flats):.5f}")
+        print(f"  P10 / P90               : {percentile(flats,10):.5f} / {percentile(flats,90):.5f}")
+        print()
         print(f"PRIMARY union coverage    : {primary_stats['union']:.3f} s")
         print(f"PRIMARY coverage ratio    : {(primary_stats['union']/duration*100.0 if duration else 0):.1f}%")
 
     clustered = sum(1 for r in rows if int(r["trigger_count"] or 1) > 1)
     tonal = sum(1 for r in rows if float(r["tonal_penalty"] or 0.0) > 0)
+    long_35 = sum(1 for r in rows if float(r["end_sec"] - r["start_sec"]) > 3.5)
     print()
-    print(f"Candidates merged from multiple triggers : {clustered}")
-    print(f"Candidates receiving tonal down-rank      : {tonal}")
+    print(f"Candidates merged from multiple fragments : {clustered}")
+    print(f"Candidates longer than 3.5 s              : {long_35}")
+    print(f"Candidates receiving tonal down-rank       : {tonal}")
     print()
+    print("V0.2.1 note: tonal flatness is recorded for analysis but its penalty is disabled.")
     print("PRIMARY = generate WAV/MP4/frames and review first.")
     print("SECONDARY = timestamp/features stay in SQLite; not discarded.")
-    print("Do not compare only total count with V0.1; compare PRIMARY precision and recall.")
+    print("Judge V0.2.1 by event granularity + PRIMARY precision/recall, not count alone.")
 
 
 if __name__ == "__main__":
