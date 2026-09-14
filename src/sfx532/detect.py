@@ -8,7 +8,7 @@ def _read_pcm16_mono(path):
         ch = w.getnchannels()
         sw = w.getsampwidth()
         if sw != 2:
-            raise ValueError("Detector V0.2 expects PCM16 WAV")
+            raise ValueError("Detector V0.2.1 expects PCM16 WAV")
         raw = w.readframes(w.getnframes())
 
     x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
@@ -77,27 +77,35 @@ def _merge_intervals(active_idx, hop_ms, merge_gap_ms):
     return intervals
 
 
-def _cluster_candidates(candidates, cluster_gap_ms, cluster_peak_ms):
-    """Merge tiny neighbouring detector fragments without deleting weak cues.
+def _cluster_candidates(candidates, cluster_peak_ms, cluster_max_span_ms):
+    """Merge only obvious duplicate fragments around nearly the same audio peak.
 
-    V0.1 often produced several sub-second candidates for one cartoon action.
-    V0.2 treats nearby fragments as one research event, keeping the strongest
-    peak as the representative synchronization point.
+    V0.2 used padded interval gaps as one of the merge conditions. Because every
+    candidate already has pre/post roll, neighbouring but distinct cues often
+    overlapped after padding and could chain into multi-second research events.
+
+    V0.2.1 deliberately ignores padded interval overlap. Two fragments may join
+    only when their representative peaks are very close AND the resulting group
+    stays below a hard maximum span. This favors event granularity over aggressive
+    compression; weak/duplicate fragments are still retained if uncertain.
     """
     if not candidates:
         return []
 
-    gap_limit = float(cluster_gap_ms) / 1000.0
     peak_limit = float(cluster_peak_ms) / 1000.0
-    ordered = sorted(candidates, key=lambda e: (e["start_sec"], e["peak_sec"]))
+    max_span = float(cluster_max_span_ms) / 1000.0
+    ordered = sorted(candidates, key=lambda e: (e["peak_sec"], e["start_sec"]))
     groups = [[ordered[0]]]
 
     for event in ordered[1:]:
         group = groups[-1]
         prev = group[-1]
-        interval_gap = float(event["start_sec"]) - float(prev["end_sec"])
         peak_gap = float(event["peak_sec"]) - float(prev["peak_sec"])
-        if interval_gap <= gap_limit or peak_gap <= peak_limit:
+        proposed_start = min(float(e["start_sec"]) for e in group + [event])
+        proposed_end = max(float(e["end_sec"]) for e in group + [event])
+        proposed_span = proposed_end - proposed_start
+
+        if peak_gap <= peak_limit and proposed_span <= max_span:
             group.append(event)
         else:
             groups.append([event])
@@ -122,10 +130,10 @@ def detect_candidates(
     window_ms=25,
     hop_ms=10,
     min_event_ms=80,
-    max_event_ms=6000,
-    merge_gap_ms=220,
-    cluster_gap_ms=180,
-    cluster_peak_ms=220,
+    max_event_ms=3500,
+    merge_gap_ms=160,
+    cluster_peak_ms=180,
+    cluster_max_span_ms=1500,
     energy_percentile=85,
     noise_percentile=20,
     noise_margin_db=10.0,
@@ -134,9 +142,9 @@ def detect_candidates(
     spectral_flux_z=3.3,
     pre_roll_ms=120,
     post_roll_ms=220,
-    tonal_flatness_threshold=0.35,
-    tonal_penalty_max=1.5,
-    primary_score_threshold=2.8,
+    tonal_flatness_threshold=0.0,
+    tonal_penalty_max=0.0,
+    primary_score_threshold=3.5,
 ):
     sr, x = _read_pcm16_mono(wav_path)
     if len(x) == 0:
@@ -159,9 +167,8 @@ def detect_candidates(
         float(absolute_floor_db),
     )
 
-    # V0.2 does not allow sustained music energy by itself to keep an event
-    # continuously active. High energy must be accompanied by some local change,
-    # while a strong onset/flux can still trigger a quiet cartoon cue.
+    # Sustained energy alone is not enough. A cue needs a local change in level
+    # or spectrum; this prevents a loud music bed from becoming one giant event.
     moderate_change = (
         (onset_score >= onset_z * 0.60)
         | (flux_score >= spectral_flux_z * 0.60)
@@ -223,14 +230,18 @@ def detect_candidates(
 
     clustered = _cluster_candidates(
         raw_candidates,
-        cluster_gap_ms=cluster_gap_ms,
         cluster_peak_ms=cluster_peak_ms,
+        cluster_max_span_ms=cluster_max_span_ms,
     )
 
     output = []
     for event in clustered:
         flatness = float(event["spectral_flatness"])
-        if tonal_flatness_threshold > 0 and flatness < tonal_flatness_threshold:
+
+        # Kept as an optional hook, but disabled in the production config until
+        # calibrated on a larger labelled set. Short-time flatness alone proved
+        # too broad on video 001 and must not silently demote every event.
+        if tonal_flatness_threshold > 0 and tonal_penalty_max > 0 and flatness < tonal_flatness_threshold:
             tonal_ratio = min(
                 1.0,
                 max(0.0, (tonal_flatness_threshold - flatness) / tonal_flatness_threshold),
@@ -252,7 +263,7 @@ def detect_candidates(
             "trigger_count": int(event["trigger_count"]),
             "spectral_flatness": round(flatness, 4),
             "tonal_penalty": round(float(tonal_penalty), 4),
-            "detector": "energy_onset_flux_cluster_v0.2",
+            "detector": "energy_onset_flux_cluster_v0.2.1",
         })
 
     return output
