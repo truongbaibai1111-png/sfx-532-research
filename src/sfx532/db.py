@@ -1,7 +1,7 @@
 import sqlite3
 from .paths import DB
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = r'''
 PRAGMA foreign_keys = ON;
@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS event_candidates (
     end_sec REAL NOT NULL,
     peak_sec REAL,
     score REAL,
+    review_score REAL,
+    review_tier TEXT NOT NULL DEFAULT 'PRIMARY',
+    trigger_count INTEGER NOT NULL DEFAULT 1,
+    spectral_flatness REAL,
+    tonal_penalty REAL NOT NULL DEFAULT 0,
     detector TEXT NOT NULL,
     audio_clip_relpath TEXT,
     video_clip_relpath TEXT,
@@ -107,6 +112,7 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_video ON event_candidates(video_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_tier ON event_candidates(video_id, review_tier);
 CREATE INDEX IF NOT EXISTS idx_events_video ON events(video_id);
 CREATE INDEX IF NOT EXISTS idx_events_action_vi ON events(action_vi);
 CREATE INDEX IF NOT EXISTS idx_events_action_en ON events(action_en);
@@ -129,15 +135,21 @@ def _ensure_column(con, table, column_name, declaration):
         con.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {declaration}")
 
 
-def _migrate_legacy_bootstrap(con):
-    # Handles databases created by the earliest project bootstrap before
-    # schema versioning was introduced. ALTER TABLE is intentionally additive
-    # so existing research is never deleted just because the tool was updated.
+def _migrate_additive(con):
+    # All migrations are additive so old research is never deleted by an update.
     _ensure_column(con, "videos", "mtime_ns", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(con, "event_candidates", "video_clip_relpath", "TEXT")
     _ensure_column(con, "event_candidates", "frame_before_relpath", "TEXT")
     _ensure_column(con, "event_candidates", "frame_peak_relpath", "TEXT")
     _ensure_column(con, "event_candidates", "frame_after_relpath", "TEXT")
+
+    # Schema 3: Detector V0.2 keeps a high-recall candidate layer but marks
+    # which candidates deserve expensive review artifacts.
+    _ensure_column(con, "event_candidates", "review_score", "REAL")
+    _ensure_column(con, "event_candidates", "review_tier", "TEXT NOT NULL DEFAULT 'PRIMARY'")
+    _ensure_column(con, "event_candidates", "trigger_count", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(con, "event_candidates", "spectral_flatness", "REAL")
+    _ensure_column(con, "event_candidates", "tonal_penalty", "REAL NOT NULL DEFAULT 0")
 
 
 def init_db():
@@ -149,11 +161,10 @@ def init_db():
                 f"Database schema {current} is newer than this tool supports ({SCHEMA_VERSION})."
             )
 
-        # Always create missing tables/indexes first. CREATE IF NOT EXISTS does
-        # not modify existing tables, so column migrations are handled below.
         con.executescript(SCHEMA)
-        _migrate_legacy_bootstrap(con)
-
-        # Version 1 -> 2 introduced incremental file scan metadata and complete
-        # visual evidence paths. The additive checks above perform the migration.
+        _migrate_additive(con)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidates_tier "
+            "ON event_candidates(video_id, review_tier)"
+        )
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
