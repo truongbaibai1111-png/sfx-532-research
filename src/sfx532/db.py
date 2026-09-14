@@ -112,7 +112,6 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_video ON event_candidates(video_id);
-CREATE INDEX IF NOT EXISTS idx_candidates_tier ON event_candidates(video_id, review_tier);
 CREATE INDEX IF NOT EXISTS idx_events_video ON events(video_id);
 CREATE INDEX IF NOT EXISTS idx_events_action_vi ON events(action_vi);
 CREATE INDEX IF NOT EXISTS idx_events_action_en ON events(action_en);
@@ -161,6 +160,8 @@ def init_db():
                 f"Database schema {current} is newer than this tool supports ({SCHEMA_VERSION})."
             )
 
+        # First ensure base tables exist. Do not create indexes that reference
+        # new columns until after the additive column migration below.
         con.executescript(SCHEMA)
         _migrate_additive(con)
         con.execute(
