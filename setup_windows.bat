@@ -1,33 +1,36 @@
 @echo off
 setlocal EnableExtensions
+cd /d "%~dp0"
+set "LOG=%~dp0setup_log.txt"
 
-rem Run the real setup in a child invocation so every line is captured to a log.
-if /I not "%~1"=="__inner" (
-  cd /d "%~dp0"
-  set "LOG=%~dp0setup_log.txt"
-  echo Running SFX 532 setup...
-  echo Full output will be saved to: "%LOG%"
-  echo.
+if /I "%~1"=="__inner" goto :inner
 
-  call "%~f0" __inner > "%LOG%" 2>&1
-  set "RC=%ERRORLEVEL%"
+echo Running SFX 532 setup...
+echo Full output will be saved to: "%LOG%"
+echo.
 
-  type "%LOG%"
-  echo.
-  echo ==================================================
-  if "%RC%"=="0" (
-    echo SETUP FINISHED SUCCESSFULLY.
-  ) else (
-    echo SETUP FAILED. Error code: %RC%
-    echo Please send setup_log.txt or a screenshot of this window.
-  )
-  echo Log file: "%LOG%"
-  echo ==================================================
-  echo.
-  pause
-  exit /b %RC%
+call "%~f0" __inner > "%LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+
+echo.
+echo ================= SETUP OUTPUT =================
+type "%LOG%"
+echo ================= END OUTPUT ===================
+echo.
+echo ==================================================
+if "%RC%"=="0" (
+  echo SETUP FINISHED SUCCESSFULLY.
+) else (
+  echo SETUP FAILED. Error code: %RC%
+  echo Please send setup_log.txt or a screenshot of this window.
 )
+echo Log file: "%LOG%"
+echo ==================================================
+echo.
+pause
+exit /b %RC%
 
+:inner
 cd /d "%~dp0"
 
 echo ==================================================
@@ -54,6 +57,10 @@ if errorlevel 1 (
   exit /b 2
 )
 ffmpeg -version | findstr /B /C:"ffmpeg version"
+if errorlevel 1 (
+  echo ERROR: FFmpeg command was found but did not run correctly.
+  exit /b 2
+)
 
 echo.
 echo [3/6] Checking FFprobe...
@@ -63,10 +70,14 @@ if errorlevel 1 (
   exit /b 3
 )
 ffprobe -version | findstr /B /C:"ffprobe version"
+if errorlevel 1 (
+  echo ERROR: FFprobe command was found but did not run correctly.
+  exit /b 3
+)
 
 echo.
 echo [4/6] Creating Python virtual environment...
-if not exist .venv\Scripts\python.exe (
+if not exist ".venv\Scripts\python.exe" (
   python -m venv .venv
   if errorlevel 1 (
     echo ERROR: Could not create .venv
@@ -76,7 +87,7 @@ if not exist .venv\Scripts\python.exe (
   echo Existing .venv found - reusing it.
 )
 
-call .venv\Scripts\activate.bat
+call ".venv\Scripts\activate.bat"
 if errorlevel 1 (
   echo ERROR: Could not activate .venv
   exit /b 5
