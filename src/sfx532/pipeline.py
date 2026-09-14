@@ -213,7 +213,7 @@ def process_video(video_id: int) -> dict:
             "primary": primary_count,
             "secondary": secondary_count,
             "artifacts_generated": primary_count,
-            "detector": "V0.2",
+            "detector": f"V{cfg['pipeline_version']}",
         }
 
     except Exception as exc:
